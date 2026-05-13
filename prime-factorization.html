@@ -307,6 +307,7 @@ body { font-family: 'Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic UI','
 .btn-cloud:disabled{ opacity:.35; cursor:not-allowed; transform:none; }
 .btn-cloud-push { background:var(--ok-l);   color:var(--ok);  border:1.5px solid var(--ok-b); }
 .btn-cloud-pull { background:var(--pri-l);  color:var(--pri); border:1.5px solid #bac8ff; }
+.btn-cloud-sync { background:linear-gradient(135deg,var(--pri),#4c6ef5); color:#fff; border:none; }
 
 /* 同期結果バナー（保存結果とは独立） */
 .sync-result-row {
@@ -429,17 +430,15 @@ body { font-family: 'Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic UI','
 
         <!-- データ同期操作（URLが保存済みの場合のみ有効） -->
         <div class="gas-sync-row">
-          <button class="btn-cloud btn-cloud-push" id="btnPush"
-                  onclick="pushToCloud(true)" disabled>↑ クラウドに送信</button>
-          <button class="btn-cloud btn-cloud-pull" id="btnPull"
-                  onclick="pullFromCloud(true)" disabled>↓ クラウドから取得</button>
+          <button class="btn-cloud btn-cloud-sync" id="btnSync"
+                  onclick="syncCloud(true)" disabled>↕ 同期する</button>
         </div>
         <div class="sync-result-row" id="syncResultRow"></div>
 
         <div class="sync-hint-box">
           <strong>使い方</strong>
-          初回（1台目）：URLを保存 → 「クラウドに送信」でデータを登録<br>
-          2台目以降：URLを保存 → 「クラウドから取得」でデータを引き継ぎ<br>
+          初回（1台目）：URLを保存 → 「同期する」でデータを登録<br>
+          2台目以降：URLを保存 → 「同期する」でデータを引き継ぎ<br>
           以降は回答するたびに自動でクラウドに送信されます
         </div>
       </div>
@@ -670,6 +669,78 @@ async function pushToCloud(manual = false) {
   }
 }
 
+/**
+ * 双方向同期: クラウドから取得 → ローカルとマージ → クラウドに送信
+ * @param {boolean} manual - true: 手動操作 / false: 自動（バックグラウンド）
+ *
+ * マージ戦略:
+ *   - alltime/today: total が多い方を優先（より多くの回答記録を保持）
+ *   - wrong:  クラウド側を基本に、ローカルのみに存在するものを追加（union）
+ */
+async function syncCloud(manual = false) {
+  const url = getGasUrl();
+  if (!url) return;
+  if (manual) setSyncResult('syncing', '⏳ 同期中…');
+  setSyncDot('syncing');
+  try {
+    /* ---- 1. クラウドから取得 ---- */
+    const res = await fetch(url + '?action=read', { redirect: 'follow' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const cloud = await res.json();
+
+    const cloudHasData = (Array.isArray(cloud.wrong) && cloud.wrong.length > 0)
+                      || (cloud.alltime && cloud.alltime.total > 0);
+
+    /* ---- 2. マージ ---- */
+    const localAllTime = loadAllTime();
+    const localToday   = loadToday();
+    const localWrong   = loadWrong();
+    const todayStr     = getTodayStr();
+    const cloudToday   = (cloud.daily && cloud.daily[todayStr]) || { total:0, correct:0 };
+    const cloudAllTime = cloud.alltime || { total:0, correct:0 };
+    const cloudWrong   = Array.isArray(cloud.wrong) ? cloud.wrong : [];
+
+    // stats は total が多い方（より多くの実績を保持）
+    const mergedAllTime = localAllTime.total >= cloudAllTime.total ? localAllTime : cloudAllTime;
+    const mergedToday   = localToday.total   >= cloudToday.total   ? localToday   : cloudToday;
+
+    // wrong は union（クラウドを基本に、ローカルのみの問題を追加）
+    const cloudNums = new Set(cloudWrong.map(p => p.num));
+    const localOnly = localWrong.filter(p => !cloudNums.has(p.num));
+    const mergedWrong = cloudHasData ? [...cloudWrong, ...localOnly] : localWrong;
+
+    // マージ結果をローカルに保存
+    saveAllTime(mergedAllTime);
+    saveToday(mergedToday);
+    saveWrong(mergedWrong);
+    updateStats();
+    updateWrongBtn();
+
+    /* ---- 3. マージ結果をクラウドに送信 ---- */
+    const payload = {
+      action:  'write',
+      wrong:   mergedWrong,
+      alltime: mergedAllTime,
+      daily:   { [todayStr]: mergedToday }
+    };
+    const pushRes = await fetch(url, {
+      method:   'POST',
+      headers:  { 'Content-Type': 'text/plain;charset=UTF-8' },
+      body:     JSON.stringify(payload),
+      redirect: 'follow'
+    });
+    if (!pushRes.ok) throw new Error('送信エラー HTTP ' + pushRes.status);
+
+    const ts = new Date().toLocaleTimeString('ja-JP');
+    if (manual) setSyncResult('ok', `✓ 同期しました（${ts}）`);
+    setSyncDot('ok');
+  } catch(e) {
+    if (manual) setSyncResult('error', '✕ 同期エラー: ' + e.message);
+    setSyncDot('error');
+    console.error('[Sync] syncCloud error:', e);
+  }
+}
+
 /* ================================================================
    SETTINGS — URL管理
 ================================================================ */
@@ -689,8 +760,7 @@ function refreshSavedUrlDisplay() {
     if (clrBtn) clrBtn.classList.remove('visible');
   }
   const hasSrc = !!url;
-  document.getElementById('btnPush').disabled = !hasSrc;
-  document.getElementById('btnPull').disabled = !hasSrc;
+  document.getElementById('btnSync').disabled = !hasSrc;
 }
 
 /** 入力欄の変化を検知してバリデーション状態を更新 */
@@ -730,7 +800,7 @@ function saveGasUrl() {
   }
 
   // 保存成功を即時表示（ネットワーク結果とは独立）
-  setUrlSaveResult('ok', '✓ URLを保存しました。「クラウドに送信」または「クラウドから取得」で同期してください。');
+  setUrlSaveResult('ok', '✓ URLを保存しました。「同期する」ボタンで同期してください。');
 
   // 保存済みURL表示を更新
   refreshSavedUrlDisplay();
