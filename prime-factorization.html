@@ -1577,3 +1577,139 @@ function showCustomInputErr(msg) {
   el.classList.add('visible');
   document.getElementById('customNumInput').classList.add('invalid');
 }
+
+/** 指定した数字を素因数分解してカードを生成する */
+function analyzeCustomNum() {
+  const input  = document.getElementById('customNumInput');
+  const errEl  = document.getElementById('customInputErr');
+  errEl.classList.remove('visible');
+  input.classList.remove('invalid');
+
+  const raw = input.value.trim();
+
+  /* --- バリデーション --- */
+  if (!raw) {
+    showCustomInputErr('数字を入力してください');
+    input.focus();
+    return;
+  }
+  if (!/^\d+$/.test(raw)) {
+    showCustomInputErr('半角数字のみ入力してください');
+    return;
+  }
+  // 先頭の 0 を除去（"007" → "7"）
+  const cleaned = raw.replace(/^0+/, '') || '0';
+  if (cleaned === '0') {
+    showCustomInputErr('1 以上の整数を入力してください');
+    return;
+  }
+  if (cleaned.length > 15) {
+    showCustomInputErr('15桁以内の数字を入力してください');
+    return;
+  }
+
+  /* --- 素因数分解 --- */
+  let n, f, fm, prime;
+  try {
+    n     = BigInt(cleaned);
+    f     = primeFactorize(n);
+    fm    = formatFormula(f);
+    prime = isPrime(f);
+  } catch(e) {
+    showCustomInputErr('計算エラーが発生しました: ' + e.message);
+    console.error('[analyzeCustomNum]', e);
+    return;
+  }
+
+  /* --- グリッドにカードを追加 --- */
+  const grid  = document.getElementById('grid');
+  // 空状態表示を削除
+  const empty = grid.querySelector('.empty');
+  if (empty) empty.remove();
+
+  // カードを生成してグリッド先頭に挿入
+  const card = buildCard('入力', cleaned, fm, prime, 0);
+  card.classList.add('custom-card');   // 視覚区別用クラス
+  card.dataset.custom = 'true';        // wrongModeフェードアウト除外フラグ
+  grid.insertBefore(card, grid.firstChild);
+
+  // 入力欄をリセット
+  input.value = '';
+  input.focus();
+
+  // カードが見えるようにスクロール
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+/* ================================================================
+   GENERATE / SHOW WRONG
+================================================================ */
+function generate() {
+  wrongMode = false;
+  document.getElementById('modeLabel').classList.remove('visible');
+  const el = document.getElementById('digits');
+  let d = parseInt(el.value, 10);
+  if (isNaN(d) || d < 1) d = 1;
+  if (d > 15) d = 15;
+  el.value = d;
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  for (let i = 0; i < 20; i++) {
+    const n = randomNDigits(d), f = primeFactorize(n), fm = formatFormula(f);
+    grid.appendChild(buildCard(i + 1, n.toString(), fm, isPrime(f), i * 28));
+  }
+}
+
+function showWrongProblems() {
+  const wrong = loadWrong();
+  if (!wrong.length) return;
+  wrongMode = true;
+  document.getElementById('modeLabel').classList.add('visible');
+  document.getElementById('modeLabelText').textContent = `不正解問題モード：${wrong.length}問を表示中`;
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  wrong.forEach((p, i) => grid.appendChild(buildCard(i + 1, p.num, p.formula, p.prime, i * 28)));
+}
+
+/* ================================================================
+   INIT
+================================================================ */
+(function init() {
+  // 1. 旧キー移行 → 三重ストレージ補完（欠損復元）
+  migrateGasUrl();
+  consolidateGasUrl(); // 起動時に3ストレージを照合・補完
+
+  // 2. デイリーインデックス再構築（既存データの移行 & 整合性修復）
+  //    初回起動時 or インデックスが空のときに全キーを走査して再構築する
+  if (loadDailyIndex().length === 0) {
+    const rebuilt = rebuildDailyIndex();
+    if (rebuilt.length > 0) {
+      console.info(`[DailyIndex] ${rebuilt.length} 件の日付データからインデックスを再構築しました。`);
+    }
+  }
+  // 今日データがあればインデックスに確実に登録
+  if (loadToday().total > 0) registerDateInIndex(getTodayStr());
+
+  // 3. 今日の日付ラベル
+  const d = new Date();
+  document.getElementById('todayDateLabel').textContent = `${d.getMonth() + 1}/${d.getDate()}`;
+
+  // 4. 画面更新
+  updateWrongBtn();
+  updateStats();
+
+  // 5. クラウド同期ドット初期表示
+  //    URL設定済みの場合のみ自動pull（空クラウードでは上書きしない安全版）
+  if (getGasUrl()) {
+    setSyncDot('syncing');
+    pullFromCloud(false); // manual=false → 空クラウドではローカルを保護
+  }
+
+  // 6. Enter キーで生成
+  document.getElementById('digits').addEventListener('keydown', e => {
+    if (e.key === 'Enter') generate();
+  });
+})();
+</script>
+</body>
+</html>
